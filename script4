@@ -1,0 +1,219 @@
+#!/usr/bin/python
+#
+# Simulate data using the fakeit command
+# Uses the Nustar and RXTE response files, and the pow model
+# 
+# This version uses parameters appropriate for bhb 
+#
+# Requires: xspec
+#
+import sys 
+from xspec import *
+from optparse import OptionParser
+import os,os.path
+import glob
+import numpy as np
+from subprocess import call
+import matplotlib.pyplot as plt
+from matplotlib.ticker import MultipleLocator, FormatStrFormatter, FuncFormatter
+#
+# ------------------------------------------------------------------------------
+#
+# MAIN PROGRAM
+#
+#
+#
+version='4'
+date='- Mon Jul 19 10:05:21 PST 2021-'
+author='Maryanne Xu'
+
+
+#-----
+# No chatter
+Xset.chatter = 0 
+
+# Query
+Fit.query = 'yes'
+
+# Set abundances and cross sections
+Xset.abund = "wilm"
+Xset.xsect = "vern"
+
+# Response files
+respath="/Users/maryannexu/Documents/bhb_behavior/script/"
+res1="nustar.rmf"
+arf1="point_60arcsecRad_1arcminOA.arf"
+back1="bgd_60arcsec.pha"
+res2="rxte_pca.rsp"
+arf2=""
+back2="rxte_back_rsp_gx.pha"
+
+# Create symbolic links
+call(["ln","-s",respath+res1])
+call(["ln","-s",respath+arf1])
+call(["ln","-s",respath+back1])
+call(["ln","-s",respath+res2])
+
+# Source and Background exposure times
+stime1=2.e4 #nustar
+btime1=stime1
+
+stime2=2.e3 #rxte
+btime2='0'
+
+# Flux for 1 mCrab
+f1mC = 3.e-11
+
+#counts output
+outfile='count_rates'
+countRatesFile = open(outfile, 'w')
+
+# Array to save the data
+NustarCounts = []
+RXTECounts = []
+
+# nrg values  
+nrg_lowerBound=['5.','8.6','3.']
+nrg_upperBound=['8.6', '18.','79.']     #soft, hard, overall
+
+for intensity in range(0, 8, 1):
+    for doubledPhoIndex in range(3, 12, 1):
+        sflux = f1mC*(10**(intensity/2))
+        phoIndex = doubledPhoIndex/2          # range doesn't take in floats
+
+        # Define the Model
+        m1 = Model("tbabs*pow")
+        m1(1).values = "0.5 -1"               # Tbabs Nh
+        m1(2).values = str(phoIndex)+" -1"    # phoIndex
+        m1(3).values = "1. -1"                # norm
+
+        #Calculate 2-10 keV flux
+        AllModels.calcFlux("2. 10.")
+        flux=AllModels(1).flux[0]
+
+        # New normalization for 100 mCrab
+        norm = sflux/flux
+        m1(3).values = str(norm)
+
+        # First simulate Nustar
+        #specfile
+        NustarSpecfile='sim_Nustar-'+str(phoIndex)+"_"+str(sflux)+'.fak'
+        #response, arf, background, exposure, correction, backExposure, fileName
+        fs1 = FakeitSettings(res1,arf1,back1,stime1,1.,btime1,NustarSpecfile)
+        AllData.fakeit(1, fs1)
+        
+        # Unload data
+        AllData.clear()
+        
+        # Then simulate RXTE
+        #specfile
+        RXTESpecfile='sim_RXTE-'+str(phoIndex)+"_"+str(sflux)+'.fak'
+        #response, arf, background, exposure, correction, backExposure, fileName
+        fs2 = FakeitSettings(res2,arf2,back2,stime2,1.,btime2,RXTESpecfile)
+        AllData.fakeit(1, fs2)
+        
+        # Unload data
+        AllData.clear()
+        
+        # Load data
+        AllData('1:1 '+NustarSpecfile+' 2:2 '+RXTESpecfile)
+        
+        NustarSpectrum = AllData(1)
+        RXTESpectrum = AllData(2)
+
+        for x, y in zip(nrg_lowerBound, nrg_upperBound):
+            # Ignore data
+            NustarSpectrum.ignore("0.-"+str(x)+","+str(y)+"-**")
+            RXTESpectrum.ignore("0.-"+str(x)+","+str(y)+"-**")
+
+            # Show rates
+            NustarCount = NustarSpectrum.rate[0]
+            RXTECount = RXTESpectrum.rate[0]
+            
+            # Save data
+            NustarCounts.append(NustarCount)
+            RXTECounts.append(RXTECount)
+
+            # Notice all
+            NustarSpectrum.notice("**-**")
+            RXTESpectrum.notice("**-**")
+        
+        # Unload data
+        AllData.clear()
+        
+#Output
+for x in NustarCounts:
+    countRatesFile.write(str(round(x))+"\t")
+    if (NustarCounts.index(x)+1)%3 == 0:
+        countRatesFile.write("\n")          #new line for every photon index
+
+countRatesFile.write("\n\n")
+
+for x in RXTECounts:
+    countRatesFile.write(str(round(x))+"\t")
+    if (RXTECounts.index(x)+1)%3 == 0:
+        countRatesFile.write("\n")
+
+countRatesFile.close()
+
+#HR output file
+outfile2='nustar_HR'
+nustarHRFile = open(outfile2, 'w')
+
+outfile3='RXTE_HR'
+RXTEHRFile = open(outfile3, 'w')
+
+#HR arrays
+NustarHR_all = []
+RXTEHR_all = []
+
+#Saving values to respective arrays
+for x, y in zip(NustarCounts, RXTECounts):
+    index = NustarCounts.index(x)           #RXTE indexed in same format
+    if(index+2)%3 == 0:
+        NustarHardCounts = x
+        RXTEHardCounts = y
+        NustarSoftCounts = NustarCounts[(index-1)]
+        RXTESoftCounts = RXTECounts[(index-1)]
+
+        NustarHR = round((NustarHardCounts/NustarSoftCounts), 4)
+        RXTEHR = round((RXTEHardCounts/RXTESoftCounts), 4)
+
+        NustarHR_all.append(NustarHR)
+        RXTEHR_all.append(RXTEHR)
+
+#Printing arrays
+for x in NustarHR_all:
+    nustarHRFile.write(str(x)+"\n")
+
+for x in RXTEHR_all:
+    RXTEHRFile.write(str(x)+"\n")
+
+#overall counts output file
+outfile4='nustar_overall_counts'
+nustar_OverallCountsFile = open(outfile4, 'w')
+
+outfile5='RXTE_overall_counts'
+RXTE_OverallCountsFile = open(outfile5, 'w')
+
+#HR arrays
+NustarOverallCounts = []
+RXTEOverallCounts = []
+
+#Saving values to respective arrays
+for x, y in zip(NustarCounts, RXTECounts):
+    index = NustarCounts.index(x)           #RXTE indexed in same format
+    if(index+1)%3 == 0:
+        NustarOverallCounts.append(x)
+        RXTEOverallCounts.append(y)
+
+#Printing arrays
+for x in NustarOverallCounts:
+    nustar_OverallCountsFile.write(str(round(x, 4))+"\n")
+
+for x in RXTEOverallCounts:
+    RXTE_OverallCountsFile.write(str(round(x, 4))+"\n")
+
+
+sys.exit()
+# ------------------------------------------------------------------------------
