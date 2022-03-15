@@ -1,1 +1,1 @@
-# bhb_behavior
+# black_hole_binary_behavior
